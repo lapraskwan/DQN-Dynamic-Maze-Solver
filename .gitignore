@@ -1,0 +1,8 @@
+__pycache__/
+logs/
+maze/
+models/
+
+training_histories.pth
+replay_buffer.pth
+main.py
