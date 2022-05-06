@@ -2,7 +2,8 @@ __pycache__/
 logs/
 maze/
 models/
+graphs/
 
 training_histories.pth
+eval_histories.pth
 replay_buffer.pth
-main.py
