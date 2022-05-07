@@ -7,3 +7,5 @@ graphs/
 training_histories.pth
 eval_histories.pth
 replay_buffer.pth
+previous_episode.pth
+starting_position.pth

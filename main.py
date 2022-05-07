@@ -184,7 +184,7 @@ class QLearningAgent:
     Agent that learns the optimal path to solve the maze using Q-Learning.
     """
 
-    def __init__(self, env, lr=1e-4, target_update=10, batch_size=128, input_size=9, device='cpu'):
+    def __init__(self, env, lr=1e-4, target_update=10, batch_size=128, input_size=9, buffer_size=torch.inf, device='cpu'):
         # Environment and initial position
         self.env = env
         self.x = env.x
@@ -203,6 +203,7 @@ class QLearningAgent:
         self.lr = lr
         self.device = device
         self.replay_buffer = []  # list of tuples: (state, action, next_state, reward, done)
+        self.buffer_size = buffer_size
 
         # Define networks
         self.feature_net = FeatureNetwork(self.get_state(self.y, self.x).shape[0], self.out_channel).to(device)
@@ -230,6 +231,16 @@ class QLearningAgent:
         self.target_feature_net.eval()
         self.target_q_net.load_state_dict(self.q_net.state_dict())
         self.target_q_net.eval()
+    
+    def load_replay_buffer(self, path):
+        """Load replay buffer to the agent. Multiple replay buffers can be loaded by calling this function multiple times with different paths."""
+        # Load previoius replay buffer
+        print(f"Loading replay buffer from: {path}")
+        previous_replay_buffer = torch.load(path, map_location=self.device)
+        self.replay_buffer.extend(previous_replay_buffer["buffer"])
+        if len(self.replay_buffer) > self.buffer_size:
+            self.replay_buffer = random.sample(self.replay_buffer, self.buffer_size)
+        print("Number of data in replay buffer:", len(self.replay_buffer))
 
     def save_maze_policy(self, path):
         """Save the current policy as an image"""
@@ -346,9 +357,9 @@ class QLearningAgent:
     def update_network(self, gamma=0.99):
         """Update network weights"""
         batch = random.sample(self.replay_buffer, min(len(self.replay_buffer), self.batch_size))
-        state_batch = torch.stack([data[0] for data in batch]).to(self.device)
+        state_batch = torch.stack([data[0].to(self.device) for data in batch])
         action_batch = torch.tensor([data[1] for data in batch]).to(self.device)
-        next_state_batch = torch.stack([data[2] for data in batch]).to(self.device)
+        next_state_batch = torch.stack([data[2].to(self.device) for data in batch])
         reward_batch = torch.tensor([data[3] for data in batch]).to(self.device)
         done = torch.tensor([data[4] for data in batch]).to(self.device)
 
@@ -377,7 +388,7 @@ class QLearningAgent:
 
         return loss.cpu().item()
 
-    def run_episode(self, start_x=1, start_y=1, mode="q_learning", epsilon=0.8, gamma=0.99, max_timestep=20000, buffer_size=torch.inf, update=True, save=True, display=None):
+    def run_episode(self, start_x=1, start_y=1, mode="q_learning", epsilon=0.8, gamma=0.99, max_timestep=20000, update=True, save=True, display=None):
         """
         Run a single episode.
         If both "full_explore" and "warm_up" modes are called, they should have the same start_x and start_y.
@@ -457,8 +468,8 @@ class QLearningAgent:
             if save:
                 self.replay_buffer.append([state, action, next_state, reward, int(self.env.game_end())])
 
-                if len(self.replay_buffer) > buffer_size:
-                    self.replay_buffer = random.sample(self.replay_buffer, buffer_size)
+                if len(self.replay_buffer) > self.buffer_size:
+                    self.replay_buffer = random.sample(self.replay_buffer, self.buffer_size)
 
             # Update networks
             if update:
@@ -479,7 +490,7 @@ class QLearningAgent:
         # Return total reward
         return self.env.timestep, total_reward, losses, self.env.game_end()
 
-    def train(self, full_explore=1, warm_up=50, q_learning=5, epsilon=0.8, min_epsilon=0.1, epsilon_decay=1e-3, move_start_position=True, previous_training_history_path=None, previous_replay_buffer_path=None, previous_eval_path=None):
+    def train(self, full_explore=1, warm_up=50, q_learning=5, epsilon=0.8, min_epsilon=0.1, epsilon_decay=1e-3, move_start_position=True, previous_training_history_path=None, previous_eval_path=None, previous_episode_path=None, starting_position_path=None):
         """
         Training loop.
 
@@ -523,13 +534,6 @@ class QLearningAgent:
             eval_rewards = previous_eval_history["rewards"]
             eval_done = previous_eval_history["done"]
 
-        # Load previoius replay buffer
-        if previous_replay_buffer_path is not None:
-            print(f"Loading replay buffer from: {previous_replay_buffer_path}")
-            previous_replay_buffer = torch.load(previous_replay_buffer_path, map_location=self.device)
-            self.replay_buffer = previous_replay_buffer["buffer"]
-            print("Number of data in replay buffer:", len(self.replay_buffer))
-
         #----- Exploration Phase -----#
         for i in range(full_explore):  # To explore the maze, initialize self.last_visited_timestep, update the maze
             st = time.perf_counter()
@@ -554,6 +558,8 @@ class QLearningAgent:
             if i+1 % 10 == 0:
                 self.save_visit_frequency(f"maze/frequency/w_{i}.png")
                 self.save_explored_maze(f"maze/explored/w_{i}.png")
+            
+            torch.save({"buffer": self.replay_buffer}, "replay_buffer.pth")
 
             print("Time used for this episode:", time.perf_counter() - st)
             print()
@@ -561,7 +567,9 @@ class QLearningAgent:
         #----- Q-Learning Phase -----#
         # Initialize the starting positions (starting from positions closer to the goal)
         starting_position = []
-        if move_start_position:
+        if starting_position_path is not None:
+            starting_position = torch.load(starting_position_path, map_location=self.device)["starting_position"]
+        elif move_start_position:
             for y in range(self.env.maze_size):
                 for x in range(self.env.maze_size):
                     starting_position.append((y, x))
@@ -574,14 +582,30 @@ class QLearningAgent:
             starting_position.append((1, 1))  # Add the starting point back because it has a 0 last visited timestep as well
         else:
             starting_position = [(1, 1)]
+        
+        # Save remaining startining positions for resume training
+        torch.save({"starting_position": starting_position}, "starting_position.pth")
+
+        print(f"Starting {len(starting_position) * q_learning} q-learning episodes. {'With' if move_start_position else 'Without'} moving start position.\n")
+
+        # Load previous episode index and epsilon
+        if previous_episode_path is not None:
+            previous_episode_info = torch.load(previous_episode_path)
+            previous_episode_index = previous_episode_info["episode"]
+            epsilon = previous_episode_info["epsilon"]
+            print(f"Resuming training from episode {previous_episode_index}\n")
 
         # Run q_learning episodes
-        print(f"Starting {len(starting_position) * q_learning} q-learning episodes. {'With' if move_start_position else 'Without'} moving start position.\n")
         for i, (y, x) in enumerate(starting_position):
+            if previous_episode_path is not None and (i+1)*q_learning <= previous_episode_index: # Skip previously trained episodes
+                continue
             # max_timestep = 20000
             max_timestep = 5 * (self.last_visited_timestep[self.env.goal_y, self.env.goal_x] - self.last_visited_timestep[y, x])
 
             for j in range(q_learning):
+                if previous_episode_path is not None and i*q_learning+j <= previous_episode_index: # Skip previously trained episodes
+                    continue
+
                 st = time.perf_counter()
                 print(f"Starting Q-Learning Episode {i*q_learning+j}. Starting point: ({x},{y})")
 
@@ -599,11 +623,8 @@ class QLearningAgent:
                 if (i*q_learning+j+1) % 100 == 0:
                     torch.save({"buffer": self.replay_buffer}, "replay_buffer.pth")
 
-                # Save exploration path and current policy as images
-                if j == q_learning - 1:  # End of one starting point
-                    self.save_visit_frequency(f"maze/frequency/q_{i*q_learning+j+1}.png")
-                    self.save_explored_maze(f"maze/explored/q_{i*q_learning+j+1}.png")
-                    self.save_maze_policy(f"maze/policy/q_{i*q_learning+j+1}.png")
+                # Save episode index for resume training
+                torch.save({"episode": i*q_learning+j, "epsilon": epsilon}, "previous_episode.pth")
 
                 # Epsilon decay
                 if epsilon > min_epsilon:
@@ -612,15 +633,29 @@ class QLearningAgent:
                 print("Time used for this episode: ", time.perf_counter() - st)
                 print()
 
-            # Evaluate policy by acting almost greedily
-            print(f"Running evaluation episode")
-            timestep, reward, _, done = self.run_episode(mode="q_learning", epsilon=0.05, display=500,
-                                                            max_timestep=max_timestep, update=False, save=False)
-            eval_timesteps.append(timestep)
-            eval_rewards.append(reward)
-            eval_done.append(done)
-            torch.save({"timesteps": timesteps, "rewards": rewards, "done": eval_done}, "eval_histories.pth")
-            print()
+            # Save exploration path and current policy as images
+            self.save_visit_frequency(f"maze/frequency/q_{i*q_learning+j+1}.png")
+            self.save_explored_maze(f"maze/explored/q_{i*q_learning+j+1}.png")
+            self.save_maze_policy(f"maze/policy/q_{i*q_learning+j+1}.png")
+
+            if (i+1)*q_learning % 100 == 0:
+                # Evaluate policy by acting almost greedily
+                print(f"Running evaluation episode")
+                timestep, reward, _, done = self.run_episode(mode="q_learning", epsilon=0.05, display=500,
+                                                                max_timestep=6000, update=False, save=False)
+                eval_timesteps.append(timestep)
+                eval_rewards.append(reward)
+                eval_done.append(done)
+                torch.save({"timesteps": timesteps, "rewards": rewards, "done": eval_done}, "eval_histories.pth")
+                print()
+            
+            # Save model
+            torch.save({
+                "feature_net": self.feature_net.state_dict(),
+                "q_net": self.q_net.state_dict(),
+                "feature_optimizer": self.feature_optimizer.state_dict(),
+                "q_optimizer": self.q_optimizer.state_dict()
+            }, "models/q_learning.pth")
 
         # Save model
         torch.save({
